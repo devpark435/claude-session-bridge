@@ -95,16 +95,33 @@ npm install
 npm run build
 ```
 
-**2. Find this folder's absolute path** — you'll paste it into the config:
+**2. Register the bridge.** Run this **inside a Claude Code session** (so it
+targets that session's config dir — see the note):
 
 ```bash
-pwd
-# example: /Users/you/projects/claude-session-bridge-mcp
+npm link                  # optional: puts `session-bridge` on PATH
+session-bridge install    # registers the MCP server + hooks
+session-bridge doctor     # verify what's set up, and where
 ```
 
-**3. Register the bridge in Claude Code.** Open `~/.claude/settings.json`
-(create it if missing) and add the blocks below. Replace `/ABSOLUTE/PATH` with
-what `pwd` printed.
+`install` merges the MCP server, the **receive** hook, and the **block-git**
+hook (blocks `git commit`/`push`/`reset`) into your active settings.json —
+idempotently, without touching your other settings. Add `--no-block-git` if you
+*want* sessions to commit on their own. (If `session-bridge` isn't on your
+`PATH`, run `node /ABSOLUTE/PATH/dist/cli.js install`.)
+
+> **Work accounts / multiple profiles.** Claude Code reads
+> `$CLAUDE_CONFIG_DIR/settings.json` when that env var is set (common for a
+> separate work login), otherwise `~/.claude/settings.json`. This is the #1
+> reason "I edited settings and nothing changed" — you edited the wrong file.
+> Running `session-bridge install` **inside a session of a given profile**
+> targets the correct file automatically. Run it once per profile. Check with
+> `session-bridge doctor`, which prints the active config dir.
+
+<details>
+<summary>Manual settings.json (if you'd rather edit by hand)</summary>
+
+Add to the right settings.json (replace `/ABSOLUTE/PATH`):
 
 ```json
 {
@@ -126,18 +143,10 @@ what `pwd` printed.
   }
 }
 ```
+</details>
 
-- `mcpServers` adds the tools a session uses to **send** messages and (in an
-  admin session) change settings.
-- The `UserPromptSubmit` hook makes a session **receive** messages automatically.
-- The `PreToolUse` hook **blocks `git commit`/`push`/`reset`** in any session
-  (recommended — see [Never auto-commit](#never-auto-commit-and-how-to-allow-it)).
-  Skip it if you *want* sessions to commit on their own.
-
-> If `settings.json` already has these keys, merge into them. All three hooks
-> no-op safely in non-bridged sessions, so they're fine to install globally.
-
-That's the whole setup.
+All hooks no-op safely in non-bridged sessions, so they're fine installed
+globally. That's the whole setup.
 
 ---
 
@@ -470,6 +479,10 @@ session only). The daemon picks it up live.
 ### CLI
 
 ```bash
+# setup (targets the active config dir: $CLAUDE_CONFIG_DIR or ~/.claude)
+session-bridge install [--no-block-git] [--config-dir <dir>]
+session-bridge doctor
+
 # inspect the bus (use any role as your identity)
 BRIDGE_PROJECT=shop BRIDGE_ROLE=cli session-bridge roles
 BRIDGE_PROJECT=shop BRIDGE_ROLE=cli session-bridge send frontend "hello"

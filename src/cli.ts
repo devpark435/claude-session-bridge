@@ -15,6 +15,7 @@ import {
   type RoleConfig,
 } from "./config.js";
 import { run as runSpawner } from "./spawner.js";
+import { activeConfigDir, doctor, install } from "./install.js";
 
 function usage(): never {
   process.stderr.write(
@@ -28,6 +29,11 @@ Usage (set BRIDGE_PROJECT and BRIDGE_ROLE first):
   session-bridge peek                   Read unread messages without consuming
   session-bridge tail [limit]           Show recent inbox messages (default 50)
   session-bridge root                   Print the bus root directory
+
+Setup (targets the ACTIVE config dir — $CLAUDE_CONFIG_DIR or ~/.claude):
+  session-bridge install [--no-block-git] [--config-dir <dir>]
+                                        Register MCP server + hooks (idempotent)
+  session-bridge doctor                 Show which config dir is active + what's set up
 
 Event spawner (auto-wake sessions on new messages):
   session-bridge spawner run [--replay]        Run the daemon (foreground)
@@ -96,6 +102,38 @@ switch (cmd) {
     register(me);
     const limit = rest[0] ? parseInt(rest[0], 10) : 50;
     out({ messages: tail(me.project, me.role, limit) });
+    break;
+  }
+  case "install": {
+    const configDir = rest.includes("--config-dir")
+      ? rest[rest.indexOf("--config-dir") + 1]
+      : undefined;
+    const r = install({ configDir, noBlockGit: rest.includes("--no-block-git") });
+    out({
+      ok: true,
+      ...r,
+      note:
+        r.added.length > 0
+          ? "Restart your Claude session for the changes to take effect."
+          : "Already installed — nothing to do.",
+    });
+    break;
+  }
+  case "doctor": {
+    const h = doctor();
+    const mark = (b: boolean) => (b ? "✓" : "✗");
+    out(
+      `Session Bridge — health check\n` +
+        `  config dir : ${h.configDir}  (${h.configDirSource})\n` +
+        `  settings   : ${h.settings}\n` +
+        `  ${mark(h.distBuilt)} dist built (run \`npm run build\` if ✗)\n` +
+        `  ${mark(h.mcpRegistered)} MCP server registered\n` +
+        `  ${mark(h.recvHook)} receive hook (UserPromptSubmit)\n` +
+        `  ${mark(h.blockGitHook)} block-git hook (PreToolUse)\n` +
+        (h.mcpRegistered && h.recvHook
+          ? "  → ready."
+          : `  → run \`session-bridge install\` (in THIS session, so it targets ${activeConfigDir()}).`),
+    );
     break;
   }
   case "spawner": {
