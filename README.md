@@ -5,6 +5,9 @@
 [![中文](https://img.shields.io/badge/%E4%B8%AD%E6%96%87-555?style=for-the-badge)](README.zh.md)
 [![日本語](https://img.shields.io/badge/%E6%97%A5%E6%9C%AC%E8%AA%9E-555?style=for-the-badge)](README.ja.md)
 
+[![npm version](https://img.shields.io/npm/v/claude-session-bridge?color=cb3837&logo=npm)](https://www.npmjs.com/package/claude-session-bridge)
+[![license](https://img.shields.io/npm/l/claude-session-bridge)](https://github.com/devpark435/claude-session-bridge)
+
 </div>
 
 # claude-session-bridge-mcp
