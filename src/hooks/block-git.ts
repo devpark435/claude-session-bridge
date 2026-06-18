@@ -37,6 +37,13 @@ function deny(reason: string): never {
 }
 
 async function main(): Promise<void> {
+  // Only guard bridged sessions. A normal session (no BRIDGE_PROJECT) commits
+  // freely — so this hook is safe to install globally. Set BRIDGE_BLOCK_GIT_ALL=1
+  // to block in every session regardless.
+  if (!process.env.BRIDGE_PROJECT && process.env.BRIDGE_BLOCK_GIT_ALL !== "1") {
+    allow();
+  }
+
   const raw = await readStdin();
   let payload: any = {};
   try {
