@@ -163,9 +163,19 @@ function nudgeTmux(
   role: string,
   target: string,
 ): void {
-  const args = [...cfg.tmuxCommand.slice(1), "send-keys", "-t", target, cfg.nudgePrompt, "Enter"];
-  const child = spawn(cfg.tmuxCommand[0], args, { stdio: ["ignore", "ignore", "inherit"] });
-  child.on("error", (err) => log(`tmux send-keys to ${target} failed: ${err.message}`));
+  // Type the prompt as literal text first, then send Enter SEPARATELY a moment
+  // later. Interactive TUIs (like Claude Code) drop a submit key that arrives in
+  // the same burst as a long paste — the text lands in the box but isn't sent.
+  const run = (extra: string[]) => {
+    const c = spawn(
+      cfg.tmuxCommand[0],
+      [...cfg.tmuxCommand.slice(1), "send-keys", "-t", target, ...extra],
+      { stdio: ["ignore", "ignore", "inherit"] },
+    );
+    c.on("error", (err) => log(`tmux send-keys to ${target} failed: ${err.message}`));
+  };
+  run(["-l", cfg.nudgePrompt]); // literal text (no key-name interpretation)
+  setTimeout(() => run(["Enter"]), 700); // submit once the TUI has rendered it
 }
 
 function handle(

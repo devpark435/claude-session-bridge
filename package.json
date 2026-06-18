@@ -21,6 +21,7 @@
     "test:prompts": "BRIDGE_ROOT=$(mktemp -d) node test/prompts-test.mjs",
     "test:spawner": "bash test/spawner-test.sh",
     "test:tmux": "bash test/tmux-test.sh",
+    "test:tmux-live": "bash test/real-tmux-demo.sh",
     "test:real": "bash test/real-session.sh"
   },
   "engines": {
