@@ -14,6 +14,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc -w",
+    "prepublishOnly": "npm run build",
+    "prepare": "npm run build",
     "test": "BRIDGE_ROOT=$(mktemp -d) node test/e2e.mjs",
     "test:config": "BRIDGE_ROOT=$(mktemp -d) node test/config-test.mjs",
     "test:prompts": "BRIDGE_ROOT=$(mktemp -d) node test/prompts-test.mjs",
