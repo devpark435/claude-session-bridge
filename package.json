@@ -15,7 +15,10 @@
     "build": "tsc",
     "dev": "tsc -w",
     "test": "BRIDGE_ROOT=$(mktemp -d) node test/e2e.mjs",
+    "test:config": "BRIDGE_ROOT=$(mktemp -d) node test/config-test.mjs",
+    "test:prompts": "BRIDGE_ROOT=$(mktemp -d) node test/prompts-test.mjs",
     "test:spawner": "bash test/spawner-test.sh",
+    "test:tmux": "bash test/tmux-test.sh",
     "test:real": "bash test/real-session.sh"
   },
   "engines": {

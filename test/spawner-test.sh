@@ -20,6 +20,7 @@ BRIDGE_PROJECT=demo BRIDGE_ROLE=backend  $CLI recv >/dev/null
 cat > "$BRIDGE_ROOT/spawner.config.json" <<EOF
 {
   "enabled": true,
+  "driver": "spawn",
   "maxHops": 4,
   "rateLimitPerMinute": 60,
   "command": ["node", "$STUB"],

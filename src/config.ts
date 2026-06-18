@@ -14,6 +14,8 @@ export interface RoleConfig {
   cwd?: string;
   model?: string;
   permissionMode?: string;
+  /** tmux driver: pane id/target override (else auto-discovered from $TMUX_PANE). */
+  tmuxTarget?: string;
 }
 
 export interface ProjectConfig {
@@ -23,8 +25,32 @@ export interface ProjectConfig {
 
 export interface SpawnerConfig {
   enabled: boolean;
+  /**
+   * How a role is woken on a new message:
+   *  - "tmux"  (default): drive the role's LIVE session via `tmux send-keys`.
+   *            Orchestrates already-open sessions; does not use `claude -p`.
+   *  - "spawn": launch a fresh headless `claude -p` per event.
+   */
+  driver: "tmux" | "spawn";
+  /** argv prefix for tmux (override for tests). */
+  tmuxCommand: string[];
+  /** A new auto-wake resets the per-project loop counter if the project has
+   *  been quiet at least this long (seconds). */
+  idleResetSeconds: number;
+  /** tmux driver: don't re-nudge the same role within this many seconds. */
+  cooldownSeconds: number;
+  /** tmux driver: the line typed into the live session to make it take a turn.
+   *  The recv hook injects the actual messages; this is just the trigger. */
+  nudgePrompt: string;
   maxHops: number;
   rateLimitPerMinute: number;
+  /**
+   * Sensitive roles that are OFF unless EXPLICITLY enabled (require opt-in
+   * with `spawner on <project> <role>`). For roles that can take outward-facing
+   * or hard-to-undo actions — deploys, releases — so a misrouted message can
+   * never auto-trigger them. Defaults to infra/qa.
+   */
+  defaultOffRoles: string[];
   /** argv prefix used to launch a session. ["claude"] in production. */
   command: string[];
   defaults: { permissionMode: string; model?: string; cwd?: string };
@@ -37,8 +63,17 @@ export interface SpawnerConfig {
 
 export const DEFAULT_CONFIG: SpawnerConfig = {
   enabled: true,
+  driver: "tmux",
+  tmuxCommand: ["tmux"],
+  idleResetSeconds: 45,
+  cooldownSeconds: 8,
+  nudgePrompt:
+    "A sibling session sent you new messages via the session bridge (injected " +
+    "above). Act on them in your part of the codebase, and share results with " +
+    "bridge_send. Do NOT git commit or push.",
   maxHops: 6,
   rateLimitPerMinute: 12,
+  defaultOffRoles: ["infra", "qa"],
   command: ["claude"],
   defaults: { permissionMode: "acceptEdits" },
   denyTools: ["Bash(git commit:*)", "Bash(git push:*)", "Bash(git reset:*)"],
@@ -73,14 +108,17 @@ export function saveConfig(cfg: SpawnerConfig): void {
 }
 
 export interface ResolvedRole {
-  cwd: string;
+  cwd?: string;
   model?: string;
   permissionMode: string;
+  tmuxTarget?: string;
 }
 
 /**
- * Resolve whether (project, role) may be spawned right now, returning the
- * launch settings, or null with a reason if it must be skipped.
+ * Resolve whether (project, role) may be woken right now, returning the launch
+ * settings, or a reason if it must be skipped. Driver-aware: the "spawn" driver
+ * needs a cwd; the "tmux" driver needs a live pane (resolved by the spawner from
+ * tmuxTarget or the auto-registered pane).
  */
 export function resolveRole(
   cfg: SpawnerConfig,
@@ -97,11 +135,19 @@ export function resolveRole(
   if (rc?.enabled === false)
     return { ok: false, reason: `role '${project}/${role}' off` };
 
-  const cwd = rc?.cwd || cfg.defaults.cwd;
-  if (!cwd)
+  // Sensitive roles must be explicitly opted in (both drivers).
+  if (cfg.defaultOffRoles?.includes(role) && rc?.enabled !== true)
     return {
       ok: false,
-      reason: `no cwd configured for '${project}/${role}' (set one to enable)`,
+      reason: `role '${role}' is off by default (sensitive); enable with: session-bridge spawner on ${project} ${role}`,
+    };
+
+  const cwd = rc?.cwd || cfg.defaults.cwd;
+  // The spawn driver launches a fresh process, so it must know where to run.
+  if (cfg.driver === "spawn" && !cwd)
+    return {
+      ok: false,
+      reason: `no cwd configured for '${project}/${role}' (required by the spawn driver)`,
     };
 
   return {
@@ -110,6 +156,7 @@ export function resolveRole(
       cwd,
       model: rc?.model || cfg.defaults.model,
       permissionMode: rc?.permissionMode || cfg.defaults.permissionMode,
+      tmuxTarget: rc?.tmuxTarget,
     },
   };
 }
@@ -134,6 +181,51 @@ export function setEnabled(
   cfg.projects[project]!.roles![role] ??= {};
   cfg.projects[project]!.roles![role]!.enabled = on;
   return cfg;
+}
+
+/** High-level per-role mode: "auto" wakes the session; "manual" leaves messages
+ *  to be picked up on its next human turn. */
+export function setMode(
+  cfg: SpawnerConfig,
+  project: string,
+  role: string,
+  mode: "auto" | "manual",
+): SpawnerConfig {
+  return setEnabled(cfg, mode === "auto", project, role);
+}
+
+const GLOBAL_KEYS = [
+  "enabled",
+  "driver",
+  "maxHops",
+  "rateLimitPerMinute",
+  "idleResetSeconds",
+  "cooldownSeconds",
+  "nudgePrompt",
+  "denyTools",
+  "defaultOffRoles",
+] as const;
+
+/** Merge allowed top-level automation settings; reports rejected keys. */
+export function setGlobals(
+  cfg: SpawnerConfig,
+  partial: Record<string, unknown>,
+): { cfg: SpawnerConfig; applied: Record<string, unknown>; rejected: string[] } {
+  const applied: Record<string, unknown> = {};
+  const rejected: string[] = [];
+  for (const [k, v] of Object.entries(partial)) {
+    if (!(GLOBAL_KEYS as readonly string[]).includes(k)) {
+      rejected.push(k);
+      continue;
+    }
+    if (k === "driver" && v !== "tmux" && v !== "spawn") {
+      rejected.push(`driver(must be tmux|spawn)`);
+      continue;
+    }
+    (cfg as unknown as Record<string, unknown>)[k] = v;
+    applied[k] = v;
+  }
+  return { cfg, applied, rejected };
 }
 
 export function setRoleField(

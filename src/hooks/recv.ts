@@ -6,13 +6,14 @@
  * it injects them into the model's context. No-ops silently otherwise so it
  * is safe to install globally across all sessions.
  */
-import { maybeIdentity, recv, register } from "../bus.js";
+import { maybeIdentity, recv, register, registerSession } from "../bus.js";
 
 function main(): void {
   const me = maybeIdentity();
   if (!me) process.exit(0); // not a bridged session — do nothing
 
   register(me);
+  registerSession(me); // keep this session's tmux pane registration fresh
   const messages = recv(me);
   if (messages.length === 0) process.exit(0);
 

@@ -1,28 +1,42 @@
 /**
  * Event spawner daemon.
  *
- * Watches the bus. When a sibling session delivers new messages to a role's
- * inbox, it wakes that role by launching a `claude -p` session (configurable),
- * which receives the messages via the recv hook, acts on them, and may reply
- * via bridge_send — enabling automatic backend<->frontend ping-pong.
+ * Watches the bus. When a sibling delivers new messages to a role's inbox, it
+ * WAKES that role so it acts on them — enabling automatic backend<->frontend
+ * ping-pong. Two drivers:
+ *
+ *  - "tmux" (default): drive the role's LIVE interactive session via
+ *    `tmux send-keys`. Orchestrates already-open sessions and does NOT use
+ *    `claude -p`. The session's recv hook injects the new messages on that turn.
+ *  - "spawn": launch a fresh headless `claude -p` per event.
  *
  * Safety:
- *  - loop guard: messages carry a `hop` counter; stops at config.maxHops
- *  - rate limit: at most config.rateLimitPerMinute spawns per (project, role)
- *  - no auto-commit: config.denyTools is always passed as --disallowed-tools
- *  - single-flight: one live spawn per (project, role); re-checks on completion
- *  - safe default: only roles with a configured cwd are ever spawned
+ *  - loop guard: a per-project chain counter caps consecutive auto-wakes
+ *    (config.maxHops), resetting after config.idleResetSeconds of quiet. Works
+ *    for both drivers (the live session can't carry the hop counter).
+ *  - rate limit: at most config.rateLimitPerMinute wakes per (project, role).
+ *  - sensitive roles (infra/qa) never auto-wake unless explicitly enabled.
+ *  - no auto-commit: spawn driver passes config.denyTools as --disallowed-tools;
+ *    for the tmux driver install the block-git PreToolUse hook (see README).
  */
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, watch, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  watch,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { busRoot, getCursor, inboxMessages, setCursor } from "./bus.js";
 import {
-  loadConfig,
-  resolveRole,
-  type SpawnerConfig,
-} from "./config.js";
+  busRoot,
+  getCursor,
+  getSessionPane,
+  inboxMessages,
+  setCursor,
+} from "./bus.js";
+import { loadConfig, resolveRole, type SpawnerConfig } from "./config.js";
 
 const distDir = dirname(fileURLToPath(import.meta.url));
 const serverPath = join(distDir, "server.js");
@@ -32,7 +46,7 @@ function log(msg: string): void {
   process.stdout.write(`[spawner] ${msg}\n`);
 }
 
-/** Generate the per-spawn --mcp-config and --settings files (hook wiring). */
+/** --mcp-config and --settings files for the spawn driver's `claude -p`. */
 function ensureLaunchFiles(): { mcp: string; settings: string } {
   const dir = join(busRoot(), ".spawner");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -66,9 +80,11 @@ function ensureLaunchFiles(): { mcp: string; settings: string } {
 const spawnerCursorName = (role: string) => `__spawner__${role}`;
 
 interface State {
-  active: Set<string>; // "project/role" currently spawning
+  active: Set<string>; // spawn driver: role currently running
   pending: Set<string>; // grew while active; re-check on completion
-  rate: Map<string, number[]>; // key -> recent spawn timestamps (ms)
+  rate: Map<string, number[]>; // key -> recent wake timestamps (ms)
+  chain: Map<string, { depth: number; last: number }>; // per-project loop counter
+  lastNudge: Map<string, number>; // tmux: key -> last nudge ts (cooldown)
 }
 
 function rateOk(state: State, key: string, cfg: SpawnerConfig): boolean {
@@ -78,17 +94,30 @@ function rateOk(state: State, key: string, cfg: SpawnerConfig): boolean {
   return win.length < cfg.rateLimitPerMinute;
 }
 
-function recordSpawn(state: State, key: string): void {
+function recordWake(state: State, key: string, project: string): void {
+  const now = Date.now();
   const arr = state.rate.get(key) || [];
-  arr.push(Date.now());
+  arr.push(now);
   state.rate.set(key, arr);
+  const c = state.chain.get(project) || { depth: 0, last: 0 };
+  c.depth += 1;
+  c.last = now;
+  state.chain.set(project, c);
 }
 
-function launch(
+/** Per-project loop guard. Returns false if the chain cap is hit. */
+function chainOk(state: State, project: string, cfg: SpawnerConfig): boolean {
+  const now = Date.now();
+  const c = state.chain.get(project) || { depth: 0, last: 0 };
+  if (now - c.last > cfg.idleResetSeconds * 1000) c.depth = 0;
+  state.chain.set(project, c);
+  return c.depth < cfg.maxHops;
+}
+
+function launchSpawn(
   cfg: SpawnerConfig,
   project: string,
   role: string,
-  hop: number,
   files: { mcp: string; settings: string },
   cwd: string,
   model: string | undefined,
@@ -109,17 +138,11 @@ function launch(
     permissionMode,
   ];
   if (model) args.push("--model", model);
-  // deny rules last (variadic) — prompt is fed via stdin, so nothing follows.
-  args.push("--disallowed-tools", ...cfg.denyTools);
+  args.push("--disallowed-tools", ...cfg.denyTools); // variadic last; prompt via stdin
 
   const child = spawn(cfg.command[0], args, {
     cwd,
-    env: {
-      ...process.env,
-      BRIDGE_PROJECT: project,
-      BRIDGE_ROLE: role,
-      BRIDGE_HOP: String(hop),
-    },
+    env: { ...process.env, BRIDGE_PROJECT: project, BRIDGE_ROLE: role, BRIDGE_HOP: "0" },
     stdio: ["pipe", "ignore", "inherit"],
   });
   child.stdin.write(cfg.prompt);
@@ -129,9 +152,20 @@ function launch(
     onExit();
   });
   child.on("error", (err) => {
-    log(`failed to launch ${project}/${role}: ${err.message}`);
+    log(`session ${project}/${role} failed to launch: ${err.message}`);
     onExit();
   });
+}
+
+function nudgeTmux(
+  cfg: SpawnerConfig,
+  project: string,
+  role: string,
+  target: string,
+): void {
+  const args = [...cfg.tmuxCommand.slice(1), "send-keys", "-t", target, cfg.nudgePrompt, "Enter"];
+  const child = spawn(cfg.tmuxCommand[0], args, { stdio: ["ignore", "ignore", "inherit"] });
+  child.on("error", (err) => log(`tmux send-keys to ${target} failed: ${err.message}`));
 }
 
 function handle(
@@ -142,54 +176,70 @@ function handle(
   role: string,
 ): void {
   const key = `${project}/${role}`;
+  const cursorName = spawnerCursorName(role);
 
-  if (state.active.has(key)) {
-    state.pending.add(key); // re-check when the current spawn finishes
+  // spawn driver single-flight
+  if (cfg.driver === "spawn" && state.active.has(key)) {
+    state.pending.add(key);
     return;
   }
 
   const all = inboxMessages(project, role);
-  const cursor = getCursor(project, spawnerCursorName(role));
-  const fresh = all.slice(cursor);
+  const fresh = all.slice(getCursor(project, cursorName));
   if (fresh.length === 0) return;
 
   const resolved = resolveRole(cfg, project, role);
   if (!resolved.ok) {
     log(`skip ${key}: ${resolved.reason}`);
-    setCursor(project, spawnerCursorName(role), all.length); // don't re-eval
+    setCursor(project, cursorName, all.length);
     return;
   }
 
-  const maxHop = Math.max(...fresh.map((m) => m.hop ?? 0));
-  if (maxHop >= cfg.maxHops) {
-    log(`loop guard: ${key} hop ${maxHop} >= ${cfg.maxHops}, not spawning`);
-    setCursor(project, spawnerCursorName(role), all.length);
+  if (!chainOk(state, project, cfg)) {
+    const c = state.chain.get(project)!;
+    log(`loop guard: '${project}' chain depth ${c.depth} >= ${cfg.maxHops}, not waking ${role}`);
+    setCursor(project, cursorName, all.length);
     return;
   }
 
   if (!rateOk(state, key, cfg)) {
     log(`rate limit: ${key} exceeded ${cfg.rateLimitPerMinute}/min, deferring`);
-    return; // leave cursor; a later event re-checks
+    return; // leave cursor; recv hook still delivers on the session's next turn
   }
 
-  // Claim these messages so we don't double-spawn for them.
-  setCursor(project, spawnerCursorName(role), all.length);
-  state.active.add(key);
-  recordSpawn(state, key);
-  log(`spawn ${key} for ${fresh.length} msg(s), hop ${maxHop} -> ${maxHop + 1}`);
+  if (cfg.driver === "tmux") {
+    const now = Date.now();
+    const last = state.lastNudge.get(key) ?? 0;
+    if (now - last < cfg.cooldownSeconds * 1000) return; // within cooldown; leave cursor
 
-  launch(
+    const target = resolved.role.tmuxTarget || getSessionPane(project, role);
+    if (!target) {
+      log(`skip ${key}: no live tmux session registered (open it inside tmux, or set tmuxTarget)`);
+      setCursor(project, cursorName, all.length);
+      return;
+    }
+    setCursor(project, cursorName, all.length);
+    state.lastNudge.set(key, now);
+    recordWake(state, key, project);
+    log(`nudge ${key} -> tmux ${target} for ${fresh.length} msg(s)`);
+    nudgeTmux(cfg, project, role, target);
+    return;
+  }
+
+  // spawn driver
+  setCursor(project, cursorName, all.length);
+  state.active.add(key);
+  recordWake(state, key, project);
+  log(`spawn ${key} for ${fresh.length} msg(s) (chain ${state.chain.get(project)?.depth}/${cfg.maxHops})`);
+  launchSpawn(
     cfg,
     project,
     role,
-    maxHop,
     files,
-    resolved.role.cwd,
+    resolved.role.cwd!,
     resolved.role.model,
     resolved.role.permissionMode,
     () => {
-      // Re-check on completion (with fresh config) to catch messages that
-      // arrived mid-run or while single-flight was blocking.
       state.active.delete(key);
       state.pending.delete(key);
       handle(state, loadConfig(), files, project, role);
@@ -208,15 +258,41 @@ function parseInboxPath(rel: string): { project: string; role: string } | null {
   return { project, role };
 }
 
+function safeReaddir(dir: string): string[] {
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+  } catch {
+    return [];
+  }
+}
+
+function rolesIn(root: string, project: string): string[] {
+  try {
+    return readdirSync(join(root, project))
+      .filter((f) => f.endsWith(".inbox.jsonl"))
+      .map((f) => f.slice(0, -".inbox.jsonl".length));
+  } catch {
+    return [];
+  }
+}
+
 export function run(opts: { replay?: boolean } = {}): void {
   const cfg = loadConfig();
   const root = busRoot();
   if (!existsSync(root)) mkdirSync(root, { recursive: true });
   const files = ensureLaunchFiles();
 
-  const state: State = { active: new Set(), pending: new Set(), rate: new Map() };
+  const state: State = {
+    active: new Set(),
+    pending: new Set(),
+    rate: new Map(),
+    chain: new Map(),
+    lastNudge: new Map(),
+  };
 
-  // Initialize spawner cursors so we react to NEW messages only (unless replay).
+  // React to NEW messages only (unless replay).
   for (const projDir of safeReaddir(root)) {
     if (projDir.startsWith(".")) continue;
     for (const role of rolesIn(root, projDir)) {
@@ -226,9 +302,9 @@ export function run(opts: { replay?: boolean } = {}): void {
     }
   }
 
-  log(`watching ${root} (enabled=${cfg.enabled}, maxHops=${cfg.maxHops}, ` +
-    `rate=${cfg.rateLimitPerMinute}/min, replay=${!!opts.replay})`);
-  log(`deny tools: ${cfg.denyTools.join(", ")}`);
+  log(`driver=${cfg.driver} | watching ${root} (enabled=${cfg.enabled}, ` +
+    `maxHops=${cfg.maxHops}, rate=${cfg.rateLimitPerMinute}/min, replay=${!!opts.replay})`);
+  if (cfg.driver === "spawn") log(`deny tools: ${cfg.denyTools.join(", ")}`);
 
   const debounce = new Map<string, NodeJS.Timeout>();
   watch(root, { recursive: true }, (_event, filename) => {
@@ -240,8 +316,7 @@ export function run(opts: { replay?: boolean } = {}): void {
     debounce.set(
       k,
       setTimeout(() => {
-        // reload config each tick so toggles take effect live
-        handle(state, loadConfig(), files, parsed.project, parsed.role);
+        handle(state, loadConfig(), files, parsed.project, parsed.role); // reload config for live toggles
       }, 120),
     );
   });
@@ -249,28 +324,7 @@ export function run(opts: { replay?: boolean } = {}): void {
   if (opts.replay) {
     for (const projDir of safeReaddir(root)) {
       if (projDir.startsWith(".")) continue;
-      for (const role of rolesIn(root, projDir)) {
-        handle(state, cfg, files, projDir, role);
-      }
+      for (const role of rolesIn(root, projDir)) handle(state, cfg, files, projDir, role);
     }
-  }
-}
-
-function safeReaddir(dir: string): string[] {
-  try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name);
-  } catch {
-    return [];
-  }
-}
-function rolesIn(root: string, project: string): string[] {
-  try {
-    return readdirSync(join(root, project))
-      .filter((f) => f.endsWith(".inbox.jsonl"))
-      .map((f) => f.slice(0, -".inbox.jsonl".length));
-  } catch {
-    return [];
   }
 }

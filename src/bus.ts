@@ -99,6 +99,29 @@ export function register(me: Identity): void {
   if (!existsSync(p)) writeFileSync(p, "");
 }
 
+function sessionsDir(project: string): string {
+  return join(projectDir(project), ".sessions");
+}
+
+/**
+ * Record this session's tmux pane id (from $TMUX_PANE) so the spawner's tmux
+ * driver can find the live session to drive. No-op outside tmux.
+ */
+export function registerSession(me: Identity): void {
+  const pane = process.env.TMUX_PANE;
+  if (!pane) return;
+  ensureDir(sessionsDir(me.project));
+  writeFileSync(join(sessionsDir(me.project), `${me.role}.pane`), pane.trim());
+}
+
+/** The tmux pane id registered for a role's live session, or null. */
+export function getSessionPane(project: string, role: string): string | null {
+  const p = join(sessionsDir(project), `${role}.pane`);
+  if (!existsSync(p)) return null;
+  const v = readFileSync(p, "utf8").trim();
+  return v || null;
+}
+
 /**
  * Send a message. `to` is a role name or "*" (everyone else in the project).
  * Returns the list of roles the message was actually delivered to.
