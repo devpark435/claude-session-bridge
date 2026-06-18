@@ -1,8 +1,16 @@
 {
-  "name": "claude-session-bridge-mcp",
+  "name": "claude-session-bridge",
   "version": "0.1.0",
   "description": "MCP message bus that bridges multiple Claude Code sessions (frontend / backend / infra) within a project. Send results from one session, auto-receive them in another.",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/devpark435/claude-session-bridge.git"
+  },
+  "homepage": "https://github.com/devpark435/claude-session-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/devpark435/claude-session-bridge/issues"
+  },
   "bin": {
     "session-bridge": "dist/cli.js",
     "session-bridge-mcp": "dist/server.js"
