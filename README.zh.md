@@ -7,7 +7,7 @@
 
 </div>
 
-# claude-session-bridge-mcp
+# claude-session-bridge
 
 **让两个（或多个）Claude Code 会话互相对话——并且还能选择让它们自我编排。**
 

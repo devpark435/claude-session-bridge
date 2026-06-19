@@ -7,7 +7,7 @@
 
 </div>
 
-# claude-session-bridge-mcp
+# claude-session-bridge
 
 **2つ（あるいはそれ以上）の Claude Code セッション同士を会話させ、必要なら自律的に
 連携させましょう。**

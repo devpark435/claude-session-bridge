@@ -10,7 +10,7 @@
 
 </div>
 
-# claude-session-bridge-mcp
+# claude-session-bridge
 
 **Let two (or more) Claude Code sessions talk to each other — and optionally
 orchestrate themselves.**

@@ -7,7 +7,7 @@
 
 </div>
 
-# claude-session-bridge-mcp
+# claude-session-bridge
 
 **두 개(또는 그 이상)의 Claude Code 세션이 서로 대화하게 하고, 원한다면 스스로
 협업까지 하도록 만드는 도구입니다.**
